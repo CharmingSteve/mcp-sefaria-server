@@ -3,12 +3,13 @@ import json
 import logging
 import os
 import urllib3
+from typing import List, Optional
 
 SEFARIA_API_BASE_URL = "https://sefaria.org"
 
-# Configure SSL verification behavior via env var (default: verify on)
-# Set SEFARIA_SSL_VERIFY to "false"/"0"/"no" to disable verification (NOT recommended for production)
-VERIFY_SSL = os.getenv("SEFARIA_SSL_VERIFY", "true").strip().lower() not in {"0", "false", "no", "off"}
+# Configure SSL verification behavior via env var (default: verify OFF unless explicitly enabled)
+# Set SEFARIA_SSL_VERIFY to "true"/"1"/"yes" to enable verification
+VERIFY_SSL = str(os.getenv("SEFARIA_SSL_VERIFY", "false")).strip().lower() not in {"0", "false", "no", "off"}
 
 # Shared HTTP session
 SESSION = requests.Session()
@@ -107,7 +108,7 @@ def get_english_text(parasha_ref):
         print(f"Could not retrieve English text for {parasha_ref}")
         return None, None
 
-async def get_commentaries(parasha_ref)-> list[str]:
+async def get_commentaries(parasha_ref) -> List[str]:
     """
     Retrieves and filters commentaries on the given verse.
     """
@@ -243,7 +244,14 @@ async def get_daily_learnings(
     except requests.exceptions.RequestException as e:
         return f"Error during calendar API request: {str(e)}"
 
-async def search_texts(query: str, slop: int =2, filters=None, size=10):
+async def search_texts(
+    query: str,
+    slop: int = 2,
+    filters=None,
+    size: int = 10,
+    index_type: str = "text",
+    field: Optional[str] = None,
+):
     """
     Search for texts in the Sefaria library.
     
@@ -259,102 +267,97 @@ async def search_texts(query: str, slop: int =2, filters=None, size=10):
     # Use the www subdomain as specified in the documentation
     url = "https://www.sefaria.org/api/search-wrapper"
     
+    # Determine effective field based on type
+    effective_field = field if field else ("content" if index_type == "sheet" else "naive_lemmatizer")
+
     # Build the request payload
     payload = {
         "query": query,
-        "type": "text",
-        # Start with a broad field; we'll fallback to exact if needed
-        "field":  "naive_lemmatizer",
+        "type": index_type,
+        "field": effective_field,
         "size": size,
-  "source_proj": True,
-        "sort_fields": [
-    "pagesheetrank"
-  ],
-  "sort_method": "score",
-        "slop": slop,
-     
+        "source_proj": True,
+        "sort_fields": ["pagesheetrank"],
+        "sort_method": "score",
     }
+    # Only include slop for text searches
+    if index_type == "text":
+        payload["slop"] = slop
+
     if filters:
         payload["filters"] = filters
+        # Per Sefaria Search API, specify fields for filters (use 'path' for text; omit for sheets unless known)
+        if index_type == "text":
+            try:
+                payload["filter_fields"] = ["path"] * len(filters)
+            except Exception:
+                # Non-fatal if we cannot add filter fields
+                pass
 
     
     # Make the POST request
     try:
-        response = SESSION.post(url, json=payload, timeout=30)
+        logging.debug(
+            f"Search API call: verify={SESSION.verify}, type={index_type}, field={effective_field}, "
+            f"filters={filters}, slop={payload.get('slop')}, size={size}"
+        )
+        response = SESSION.post(url, json=payload, timeout=30, verify=SESSION.verify)
         response.raise_for_status()
         
         logging.debug(f"Sefaria's Search API response: {response.text}")
         
-        try:
-            response = SESSION.post(url, json=payload, timeout=20)
-        
-        print(data)
-        
-        # Format the results
-        results = []
-        
-            # Get the actual total hits count
-            total_hits = data["hits"].get("total", 0)
-            # Handle different response formats
-            if isinstance(total_hits, dict) and "value" in total_hits:
-                total_hits = total_hits["value"]
-            def build_results(d: dict):
-                out = []
-                if "hits" in d and "hits" in d["hits"]:
-                    # Get the actual total hits count
-                    total_hits = d["hits"].get("total", 0)
-                    if isinstance(total_hits, dict) and "value" in total_hits:
-                        total_hits = total_hits["value"]
-                
-                    # Process each hit
-                    for hit in d["hits"]["hits"]:
-                        source = hit.get("_source", {})
-                        ref = source.get("ref", "")
-                        heRef = source.get("heRef", "")
-                    
-                        # Get the content snippet
-                        text_snippet = ""
-                    
-                        # Get highlighted text if available (this contains the search term highlighted)
-                        highlight = hit.get("highlight") or {}
-                        for field_name, highlights in highlight.items():
+        # Parse JSON response
+        data = response.json()
+
+        def build_results(d: dict) -> List[str]:
+            res: List[str] = []
+            if "hits" in d and isinstance(d["hits"], dict) and "hits" in d["hits"]:
+                for hit in d["hits"]["hits"]:
+                    source = hit.get("_source", {})
+                    # Text indices have 'ref'; sheets may have 'title'/'sheetUrl'
+                    ref = source.get("ref") or source.get("title") or ""
+                    heRef = source.get("heRef", "")
+                    text_snippet = ""
+                    highlight = hit.get("highlight") or {}
+                    if isinstance(highlight, dict):
+                        for _, highlights in highlight.items():
                             if highlights and isinstance(highlights, list):
                                 text_snippet = " [...] ".join(highlights[:2])
                                 break
-                    
-                        # If no highlight, use content from the source
-                        if not text_snippet:
-                            for field_name in ["naive_lemmatizer", "exact"]:
-                                content = source.get(field_name)
-                                if content:
-                                    if isinstance(content, list) and content:
-                                        content = " ".join(map(str, content))
-                                    if isinstance(content, str):
-                                        text_snippet = content[:300] + ("..." if len(content) > 300 else "")
-                                        break
-                    
-                        # Add the formatted result
-                        out.append(f"Reference: {ref}\nHebrew Reference: {heRef}\nSnippet: {text_snippet}\n")
-                return out
+                    if not text_snippet:
+                        # For text: check naive/exact; for sheets: check 'content'
+                        fallback_fields = ["naive_lemmatizer", "exact"] if index_type == "text" else ["content"]
+                        for field_name in fallback_fields:
+                            content = source.get(field_name)
+                            if isinstance(content, str) and content:
+                                text_snippet = content[:300] + ("..." if len(content) > 300 else "")
+                                break
+                    res.append(f"Reference: {ref}\nHebrew Reference: {heRef}\nSnippet: {text_snippet}\n")
+            return res
 
-            results = build_results(data)
-        
-            # If no results, try a more exact search as a fallback
-            if not results:
-                fallback_payload = {
-                    **payload,
-                    "field": "exact",
-                    "slop": 0,
-                }
-                try:
-                    fb_resp = SESSION.post(url, json=fallback_payload, timeout=20)
-                    fb_resp.raise_for_status()
-                    fb_data = fb_resp.json()
-                    results = build_results(fb_data)
-                except requests.exceptions.RequestException as e:
-                    logging.debug(f"Fallback search request failed: {e}")
-                except json.JSONDecodeError:
-                    logging.debug("Fallback search JSON decode failed")
-            # Process each hit
+        results = build_results(data)
+
+        # Fallback: for text searches, try exact field with slop 0 if no hits
+        if not results and index_type == "text" and effective_field != "exact":
+            fallback = dict(payload)
+            fallback["field"] = "exact"
+            fallback["slop"] = 0
+            try:
+                fb_resp = SESSION.post(url, json=fallback, timeout=30, verify=SESSION.verify)
+                fb_resp.raise_for_status()
+                fb_data = fb_resp.json()
+                results = build_results(fb_data)
+            except requests.exceptions.RequestException:
+                pass
+            except json.JSONDecodeError:
+                pass
+
+        if len(results) == 0:
+            return f"No results found for '{query}'."
+        logging.debug(f"formated results: {results}")
+        return "\n".join(results)
+    
+    except json.JSONDecodeError as e:
+        return f"Error: Failed to parse JSON response: {str(e)}"
+    except requests.exceptions.RequestException as e:
         return f"Error during search API request: {str(e)}"
-            if len(results) == 0:

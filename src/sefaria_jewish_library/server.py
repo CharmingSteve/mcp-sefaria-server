@@ -71,6 +71,18 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "The search query",
                     },
+                    "type": {
+                        "type": "string",
+                        "description": "Index to search: 'text' (books) or 'sheet' (source sheets).",
+                        "enum": ["text", "sheet"],
+                        "default": "text"
+                    },
+                    "field": {
+                        "type": "string",
+                        "description": "Field to query. For type=text use 'naive_lemmatizer' (default) or 'exact'. For type=sheet use 'content'.",
+                        "enum": ["naive_lemmatizer", "exact", "content"],
+                        "default": "naive_lemmatizer"
+                    },
                     "slop":{
                         "type": "integer",
                         "description": "The maximum distance between each query word in the resulting document. 0 means an exact match must be found.",
@@ -203,9 +215,11 @@ async def handle_call_tool(
                 size = arguments.get("size")
                 if size is None:
                     size = 10
+                index_type = arguments.get("type") or "text"
+                field = arguments.get("field") or ("content" if index_type == "sheet" else "naive_lemmatizer")
                 
                 logger.debug(f"handle_search_texts: {query}")
-                results = await search_texts(query, slop, filters, size)
+                results = await search_texts(query, slop, filters, size, index_type=index_type, field=field)
                 
                 return [types.TextContent(
                     type="text",
@@ -254,6 +268,12 @@ async def handle_call_tool(
 async def main():
     try:
         logger.info("Starting Jewish Library MCP server...")
+        try:
+            # Report SSL verification status from HTTP layer
+            from .sefaria_handler import VERIFY_SSL as SEFARIA_SSL_VERIFY
+            logger.info(f"Sefaria SSL verification is {'ENABLED' if SEFARIA_SSL_VERIFY else 'DISABLED'} (set via SEFARIA_SSL_VERIFY)")
+        except Exception:
+            logger.warning("Could not determine Sefaria SSL verification status")
             
         # Run the server using stdin/stdout streams
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):

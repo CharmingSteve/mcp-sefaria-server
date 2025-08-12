@@ -10,4 +10,4 @@ startCommand:
   commandFunction:
     # A function that produces the CLI command to start the MCP on stdio.
     |-
-    config => ({command:'uv',args:['--directory', '/app', 'run', 'sefaria_jewish_library'],env:{PYTHONIOENCODING:'utf-8'}})
+  config => ({command:'uv',args:['--directory', '/app', 'run', 'sefaria_jewish_library'],env:{PYTHONIOENCODING:'utf-8',SEFARIA_SSL_VERIFY:'false'}})
