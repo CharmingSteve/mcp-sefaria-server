@@ -1,8 +1,23 @@
 import requests
 import json
 import logging
+import os
+import urllib3
 
 SEFARIA_API_BASE_URL = "https://sefaria.org"
+
+# Configure SSL verification behavior via env var (default: verify on)
+# Set SEFARIA_SSL_VERIFY to "false"/"0"/"no" to disable verification (NOT recommended for production)
+VERIFY_SSL = os.getenv("SEFARIA_SSL_VERIFY", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+# Shared HTTP session
+SESSION = requests.Session()
+SESSION.verify = VERIFY_SSL
+
+if not VERIFY_SSL:
+    # Suppress InsecureRequestWarning when verification is disabled
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    logging.warning("SSL certificate verification is DISABLED for Sefaria requests (SEFARIA_SSL_VERIFY). Use only for debugging.")
 
 def get_request_json_data(endpoint, ref=None, param=None):
     """
@@ -17,7 +32,7 @@ def get_request_json_data(endpoint, ref=None, param=None):
         url += f"?{param}"
 
     try:
-        response = requests.get(url)
+        response = SESSION.get(url, timeout=20)
         response.raise_for_status()  # Raise an exception for bad status codes
         data = response.json()
         return data
@@ -159,7 +174,7 @@ async def get_daily_learnings(
         params["timezone"] = timezone
     
     try:
-        response = requests.get(url, params=params)
+        response = SESSION.get(url, params=params, timeout=30)
         response.raise_for_status()
         
         logging.debug(f"Sefaria's Calendar API response: {response.text}")
@@ -248,6 +263,7 @@ async def search_texts(query: str, slop: int =2, filters=None, size=10):
     payload = {
         "query": query,
         "type": "text",
+        # Start with a broad field; we'll fallback to exact if needed
         "field":  "naive_lemmatizer",
         "size": size,
   "source_proj": True,
@@ -264,65 +280,81 @@ async def search_texts(query: str, slop: int =2, filters=None, size=10):
     
     # Make the POST request
     try:
-        response = requests.post(url, json=payload)
+        response = SESSION.post(url, json=payload, timeout=30)
         response.raise_for_status()
         
         logging.debug(f"Sefaria's Search API response: {response.text}")
         
-        # Parse JSON response
-        data = response.json()
+        try:
+            response = SESSION.post(url, json=payload, timeout=20)
         
         print(data)
         
         # Format the results
         results = []
         
-        # Check if we have hits in the response
-        if "hits" in data and "hits" in data["hits"]:
             # Get the actual total hits count
             total_hits = data["hits"].get("total", 0)
             # Handle different response formats
             if isinstance(total_hits, dict) and "value" in total_hits:
                 total_hits = total_hits["value"]
-         
-            # Process each hit
-            for hit in data["hits"]["hits"]:
-                source = hit["_source"]
-                ref = source["ref"]
-                heRef = source["heRef"]
+            def build_results(d: dict):
+                out = []
+                if "hits" in d and "hits" in d["hits"]:
+                    # Get the actual total hits count
+                    total_hits = d["hits"].get("total", 0)
+                    if isinstance(total_hits, dict) and "value" in total_hits:
+                        total_hits = total_hits["value"]
                 
-                # Get the content snippet
-                text_snippet = ""
-                
-                # Get highlighted text if available (this contains the search term highlighted)
-                if "highlight" in hit:
-                    for field_name, highlights in hit["highlight"].items():
-                        if highlights and len(highlights) > 0:
-                            # Join multiple highlights with ellipses
-                            text_snippet = " [...] ".join(highlights)
-                            break
-                
-                # If no highlight, use content from the source
-                if not text_snippet:
-                    # Try different fields that might contain content
-                    for field_name in ["naive_lemmatizer", "exact"]:
-                        if field_name in source and source[field_name]:
-                            content = source[field_name]
-                            if isinstance(content, str):
-                                # Limit to a reasonable snippet length
-                                text_snippet = content[:300] + ("..." if len(content) > 300 else "")
+                    # Process each hit
+                    for hit in d["hits"]["hits"]:
+                        source = hit.get("_source", {})
+                        ref = source.get("ref", "")
+                        heRef = source.get("heRef", "")
+                    
+                        # Get the content snippet
+                        text_snippet = ""
+                    
+                        # Get highlighted text if available (this contains the search term highlighted)
+                        highlight = hit.get("highlight") or {}
+                        for field_name, highlights in highlight.items():
+                            if highlights and isinstance(highlights, list):
+                                text_snippet = " [...] ".join(highlights[:2])
                                 break
-             
-                # Add the formatted result
-                results.append(f"Reference: {ref}\n Hebrew Reference: {heRef}\n Highlight: {text_snippet}\n")
+                    
+                        # If no highlight, use content from the source
+                        if not text_snippet:
+                            for field_name in ["naive_lemmatizer", "exact"]:
+                                content = source.get(field_name)
+                                if content:
+                                    if isinstance(content, list) and content:
+                                        content = " ".join(map(str, content))
+                                    if isinstance(content, str):
+                                        text_snippet = content[:300] + ("..." if len(content) > 300 else "")
+                                        break
+                    
+                        # Add the formatted result
+                        out.append(f"Reference: {ref}\nHebrew Reference: {heRef}\nSnippet: {text_snippet}\n")
+                return out
+
+            results = build_results(data)
         
-        # Return a message if no results were found
-        if len(results) <= 1:
-            return f"No results found for '{query}'."
-        logging.debug(f"formated results: {results}")
-        return "\n".join(results)
-    
-    except json.JSONDecodeError as e:
-        return f"Error: Failed to parse JSON response: {str(e)}"
-    except requests.exceptions.RequestException as e:
+            # If no results, try a more exact search as a fallback
+            if not results:
+                fallback_payload = {
+                    **payload,
+                    "field": "exact",
+                    "slop": 0,
+                }
+                try:
+                    fb_resp = SESSION.post(url, json=fallback_payload, timeout=20)
+                    fb_resp.raise_for_status()
+                    fb_data = fb_resp.json()
+                    results = build_results(fb_data)
+                except requests.exceptions.RequestException as e:
+                    logging.debug(f"Fallback search request failed: {e}")
+                except json.JSONDecodeError:
+                    logging.debug("Fallback search JSON decode failed")
+            # Process each hit
         return f"Error during search API request: {str(e)}"
+            if len(results) == 0:

@@ -78,9 +78,10 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                  
                     "filters":{
-                        "type": "list",
+                        "type": "array",
+                        "items": {"type": "string"},
                         "description": 'Filters to apply to the text path in English (Examples: "Shulkhan Arukh", "maimonides", "talmud").',
-                        "default" : "[]"
+                        "default" : []
 
                     },                        
                     "size": {
@@ -170,7 +171,7 @@ async def handle_call_tool(
             try:
                 reference = arguments.get("reference")
                 if not reference:
-                    raise ValueError("Missing  parameter")
+                    raise ValueError("Missing reference parameter")
                 
                 logger.debug(f"handle_get_commentaries: {reference}")
                 commentaries = await get_commentaries(reference)
@@ -193,13 +194,14 @@ async def handle_call_tool(
                     raise ValueError("Missing query parameter")
                     
                 slop = arguments.get("slop")
-                if not slop : # Use 'is None' to distinguish between explicitly provided null and missing key
+                if slop is None:
                     slop = 2
                 filters = arguments.get("filters")
-                if not filters:
+                # Allow explicit empty list [] to mean no filters; use None only if key missing
+                if filters is None:
                     filters = None
                 size = arguments.get("size")
-                if not size:
+                if size is None:
                     size = 10
                 
                 logger.debug(f"handle_search_texts: {query}")
