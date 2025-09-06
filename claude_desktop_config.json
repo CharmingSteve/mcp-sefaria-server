@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "sefaria_jewish_library": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/steve/Documents/mcp-sefaria-server",
+        "run",
+        "python",
+        "-m",
+        "src.sefaria_jewish_library.server"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "SEFARIA_SSL_VERIFY": "false"
+      }
+    }
+  }
+}
