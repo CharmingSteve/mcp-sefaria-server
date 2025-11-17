@@ -14,3 +14,5 @@ venv
 # Tantivy index
 index
 sefaria_jewish_library.log
+.DS_Store
+*.code-workspace

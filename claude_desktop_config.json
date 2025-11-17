@@ -1,5 +1,5 @@
 {
-  "args" : [
+  "args": [
     "--directory",
     "/Users/stevebar/Documents/mcp-sefaria-server",
     "run",
@@ -7,10 +7,10 @@
     "-m",
     "src.sefaria_jewish_library.server"
   ],
-  "command" : "uv",
-  "env" : {
-    "PYTHONIOENCODING" : "utf-8",
-    "SEFARIA_SSL_VERIFY" : "false"
+  "command": "uv",
+  "env": {
+    "PYTHONIOENCODING": "utf-8",
+    "SEFARIA_SSL_VERIFY": "false"
   },
-  "useBuiltInNode" : true
+  "useBuiltInNode": true
 }
